@@ -550,14 +550,47 @@ def parse_sections(text):
     # ── 섹션 경계 찾기 ──
     # [역공학] 【 로 시작하는 줄 = 새 섹션 시작.
     # 표제부는 간혹 【 없이 '기본정보'로 시작하는 경우도 대응.
+    # [실패사례] OCR이 【을구】를 【을 _ 구】처럼 깨뜨리는 경우 있음.
+    # → 공백/특수문자 제거 후 부분 매칭으로 대응.
+    # [실패사례] 【갑구】가 완전히 누락되는 PDF도 있음.
+    # → '순위번호 | 등기목적' 라인을 보조 경계로 활용.
     boundaries = []
     for i, line in enumerate(lines):
         stripped = line.strip()
+        # OCR 깨짐 대응: 【 을 _ 구 】 → 공백 제거 → 【을구】 매칭
+        stripped_no_space = re.sub(r'\s+', '', stripped)
         if stripped.startswith('【') and any(
-            kw in stripped for kw in ['표제부', '갑구', '을구', '매매목록', '공동담보']):
+            kw in stripped_no_space for kw in ['표제부', '갑구', '을구', '매매목록', '공동담보']):
             boundaries.append((i, stripped))
         elif '기본정보' in stripped and not boundaries:
             boundaries.append((i, '기본정보'))
+        # [실패사례] 【갑구】 누락 시 — 컬럼헤더로 보조 감지
+        elif (re.search(r'순위번호\s*[\|]\s*등기목적', stripped_no_space)
+              and not any('갑구' in b[1] for b in boundaries)):
+            boundaries.append((i, '【갑구】'))
+    
+    # [실패사례] 중복 섹션명 방지 + 섹션명 정규화
+    # OCR 결과가 【표제부】(토지의표시) 로 나오면 → 【표제부】 로 정규화
+    seen = set()
+    normalized_boundaries = []
+    for start, name in boundaries:
+        norm_name = name
+        if '표제부' in re.sub(r'\s+', '', name):
+            norm_name = '【표제부】'
+        elif '갑구' in re.sub(r'\s+', '', name):
+            norm_name = '【갑구】'
+        elif '을구' in re.sub(r'\s+', '', name):
+            norm_name = '【을구】'
+        elif '매매목록' in re.sub(r'\s+', '', name):
+            norm_name = '【매매목록】'
+        elif '공동담보' in re.sub(r'\s+', '', name):
+            norm_name = '【공동담보목록】'
+        
+        if norm_name not in seen:
+            seen.add(norm_name)
+            normalized_boundaries.append((start, norm_name))
+    
+    boundaries = normalized_boundaries
 
     # ── 섹션별 라인 할당 ──
     # [실패사례] 첫 번째 【 섹션 이전에 있는 라인(고유번호, 소재지 등)이
