@@ -560,9 +560,13 @@ def parse_sections(text):
             boundaries.append((i, '기본정보'))
 
     # ── 섹션별 라인 할당 ──
+    # [실패사례] 첫 번째 【 섹션 이전에 있는 라인(고유번호, 소재지 등)이
+    #   누락되는 버그. → 첫 섹션의 시작을 0으로 보정.
     for idx, (start, name) in enumerate(boundaries):
         end = boundaries[idx + 1][0] if idx + 1 < len(boundaries) else len(lines)
-        section_lines = lines[start:end]
+        # 첫 번째 섹션: 【 앞의 라인도 포함
+        actual_start = 0 if idx == 0 else start
+        section_lines = lines[actual_start:end]
         result['sections'][name] = section_lines
 
     # 기본정보가 없으면 헤더로 추가
@@ -769,6 +773,15 @@ def _extract_basic_info(sections):
 
     [역공학] output.xlsx Row 4-7 의 라벨-값 쌍을
     정규식으로 추출. 실패 시 빈 문자열 반환.
+
+    [실패사례] 초기 정규식은 "고유번호 : 2849-..." 형식을 기대했으나
+    실제 OCR 결과는 "고유번호2849-2018-019318"처럼
+    라벨-값 사이에 구분자 없이 붙어나오는 경우가 많음.
+    → 구분자 없는 직접 연결 케이스 추가 대응.
+
+    [실패사례] "소재지" 라벨이 OCR에서 누락되고
+    대신 "[토지]주소" 형식으로 출력됨.
+    → [토지] 패턴을 소재지 대체 정보로 활용.
     """
     info = {}
     all_lines = []
@@ -776,16 +789,51 @@ def _extract_basic_info(sections):
         all_lines.extend(lines)
     full_text = '\n'.join(all_lines)
 
-    patterns = {
-        '고유번호': r'고유번호\s*[:\|]?\s*(\S+)',
-        '소재지':   r'소재지\s*[:\|]?\s*(.+?)(?=부동산종류|열람일시|$)',
-        '부동산종류': r'부동산종류\s*[:\|]?\s*(\S+)',
-        '열람일시': r'열람일시\s*[:\|]?\s*(.+?)(?:\n|$)',
-    }
-    for key, pat in patterns.items():
-        m = re.search(pat, full_text)
+    # ── 고유번호 ──
+    # [실패사례] "고유번호2849-2018-019318" (붙어있음)
+    #           "고유번호 : 2849-..." (콜론 있음)
+    #           "고유번호 2849-..." (공백 구분)
+    m = re.search(r'고유번호\s*[:\|]?\s*(\d{4}-\d{4}-\d{6})', full_text)
+    if not m:
+        m = re.search(r'고유번호\s*(\d{4}-\d{4}-\d{6})', full_text)
+    if m:
+        info['고유번호'] = m.group(1).strip()
+
+    # ── 부동산종류 ──
+    # [역공학] output.xlsx 에서 "[토지]" 또는 "[건물]" 형식
+    m = re.search(r'\[(토지|건물|토지및건물)\]', full_text)
+    if m:
+        kind_map = {'토지': '토지', '건물': '건물', '토지및건물': '토지 및 건물'}
+        info['부동산종류'] = kind_map.get(m.group(1), m.group(1))
+    else:
+        m = re.search(r'부동산종류\s*[:\|]?\s*(\S+)', full_text)
         if m:
-            info[key] = m.group(1).strip()
+            info['부동산종류'] = m.group(1).strip()
+
+    # ── 소재지 ──
+    # [실패사례] OCR 결과가 "[토지]경기도파주시파평면마산리113-2" 형식.
+    #           "소재지:" 라벨이 없는 경우 [토지]/[건물] 뒤 주소를 사용.
+    m = re.search(r'소재지\s*[:\|]?\s*(.+?)(?=부동산종류|열람일시|\n\n|\Z)', full_text, re.DOTALL)
+    if m and len(m.group(1).strip()) > 3:
+        info['소재지'] = re.sub(r'\s+', ' ', m.group(1).strip())
+    else:
+        # fallback: [토지] 또는 [건물] 다음에 나오는 주소 추출
+        m = re.search(r'\[(토지|건물|토지및건물)\]\s*(.+?)(?:\n|열람일시|고유번호)', full_text)
+        if m:
+            addr = m.group(2).strip()
+            # 등기번호(숫자-숫자-숫자) 이후는 주소가 아니므로 제거
+            addr = re.sub(r'\d{4}-\d{4}-\d{6}.*', '', addr).strip()
+            if len(addr) > 3:
+                info['소재지'] = addr
+
+    # ── 열람일시 ──
+    # [역공학] output.xlsx 날짜 형식: "2026년03월31일17시25분59초"
+    m = re.search(r'열람일시\s*[:\|]?\s*(\d{4}년\d{2}월\d{2}일\d{1,2}시\d{1,2}분\d{1,2}초)', full_text)
+    if not m:
+        m = re.search(r'(\d{4}년\d{2}월\d{2}일\d{1,2}시\d{1,2}분\d{1,2}초)', full_text)
+    if m:
+        info['열람일시'] = m.group(1).strip()
+
     return info
 
 
